@@ -16,10 +16,23 @@
             <label class="block text-sm font-semibold text-gray-700 mb-2">输入 Bash/Linux 命令：</label>
             <textarea 
                 id="inputCmd" 
-                rows="6" 
+                rows="8" 
                 class="w-full p-4 border-2 border-gray-300 rounded-lg font-mono text-sm focus:border-blue-500 focus:outline-none"
                 placeholder="粘贴你的 Docker 命令，支持用 \ 续行...&#10;&#10;例如：&#10;docker run -it -p 7860:7860 --platform=linux/amd64 --gpus all \&#10;  registry.hf.space/example:latest python app.py"
             ></textarea>
+            
+            <div class="mt-4 flex items-center">
+                <input 
+                    type="checkbox" 
+                    id="useMirror" 
+                    checked
+                    class="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 cursor-pointer"
+                >
+                <label for="useMirror" class="ml-2 text-sm font-medium text-gray-700 cursor-pointer">
+                    🇨🇳 使用国内镜像站加速 (推荐)
+                </label>
+            </div>
+            
             <button 
                 onclick="convert()" 
                 class="mt-4 w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition duration-200 shadow-md">
@@ -38,7 +51,7 @@
             </div>
             <textarea 
                 id="outputCmd" 
-                rows="6" 
+                rows="8" 
                 readonly
                 class="w-full p-4 border-2 border-green-300 rounded-lg font-mono text-sm bg-green-50 focus:outline-none"
                 placeholder="转换后的命令将显示在这里..."
@@ -54,15 +67,50 @@
                 <span class="font-semibold">⚠️ 注意：</span> 
                 转换时会将 <code class="bg-yellow-200 px-1 rounded">\</code> 续行符替换为 PowerShell 的反引号 <code class="bg-yellow-200 px-1 rounded">`</code>，并清理多余空白。
             </p>
+            <p class="text-sm text-gray-700 mt-2">
+                <span class="font-semibold">🌐 镜像站替换规则：</span>
+            </p>
+            <ul class="text-xs text-gray-600 mt-1 ml-4 space-y-1">
+                <li>• <code class="bg-gray-100 px-1">registry.hf.space/</code> → <code class="bg-gray-100 px-1">hf-mirror.com/</code></li>
+                <li>• <code class="bg-gray-100 px-1">huggingface.co</code> → <code class="bg-gray-100 px-1">hf-mirror.com</code></li>
+                <li>• <code class="bg-gray-100 px-1">docker.io/</code> → <code class="bg-gray-100 px-1">docker.m.daocloud.io/</code></li>
+                <li>• <code class="bg-gray-100 px-1">ghcr.io/</code> → <code class="bg-gray-100 px-1">ghcr.m.daocloud.io/</code></li>
+                <li>• 自动添加 <code class="bg-gray-100 px-1">-e HF_ENDPOINT=https://hf-mirror.com</code> 环境变量</li>
+            </ul>
         </div>
     </div>
 
     <script>
+        // 镜像站域名映射
+        const mirrorMappings = {
+            // HuggingFace 相关
+            'registry.hf.space': 'hf-mirror.com',
+            'huggingface.co': 'hf-mirror.com',
+            
+            // Docker Hub
+            'docker.io': 'docker.m.daocloud.io',
+            
+            // 其他镜像站
+            'ghcr.io': 'ghcr.m.daocloud.io',
+            'gcr.io': 'gcr.m.daocloud.io',
+            'quay.io': 'quay.m.daocloud.io',
+            'k8s.gcr.io': 'k8s-gcr.m.daocloud.io'
+        };
+
+        function applyMirrorToUrl(url) {
+            let result = url;
+            for (const [original, mirror] of Object.entries(mirrorMappings)) {
+                result = result.replace(new RegExp(original.replace('.', '\\.'), 'g'), mirror);
+            }
+            return result;
+        }
+
         function convert() {
             const input = document.getElementById('inputCmd').value;
             const output = document.getElementById('outputCmd');
             const notice = document.getElementById('notice');
             const noticeText = document.getElementById('noticeText');
+            const useMirror = document.getElementById('useMirror').checked;
             
             if (!input.trim()) {
                 output.value = '';
@@ -70,23 +118,66 @@
                 return;
             }
 
-            // 转换逻辑
+            // 第一步：转换续行符
             let converted = input
-                .replace(/\\\s*\n\s*/g, ' ` \n  ') // 把 \ 续行换成 ` 续行，保持缩进
-                .replace(/\s+/g, ' ')              // 压缩多余空格
+                .replace(/\\\s*\n\s*/g, ' ` \n  ') // 把 \ 续行换成 ` 续行
                 .trim();
 
-            // 检测是否有续行
-            const hasMultiLine = input.includes('\\');
-            
-            output.value = converted;
+            let replacements = [];
 
-            // 显示提示
+            // 第二步：应用镜像替换
+            if (useMirror) {
+                // 替换所有 URL 中的镜像站
+                let originalConverted = converted;
+                converted = applyMirrorToUrl(converted);
+                
+                if (converted !== originalConverted) {
+                    replacements.push('已替换镜像站域名');
+                }
+
+                // 检查是否已有 HF_ENDPOINT 环境变量
+                const hasHfEndpoint = /HF_ENDPOINT\s*=/i.test(converted);
+                
+                if (!hasHfEndpoint) {
+                    // 找到 docker run 后的位置，在镜像名之前插入环境变量
+                    const dockerRunMatch = converted.match(/(docker\s+run\s+[^`]*?)(\s+[^\s-][^\s]*:)/);
+                    
+                    if (dockerRunMatch) {
+                        const beforeImage = dockerRunMatch[1];
+                        const imageAndRest = converted.substring(beforeImage.length);
+                        
+                        // 检查是否已经是多行格式
+                        const isMultiLine = converted.includes('`');
+                        
+                        if (isMultiLine) {
+                            // 多行格式：添加独立一行
+                            converted = beforeImage + ' ` \n  -e HF_ENDPOINT=https://hf-mirror.com' + imageAndRest;
+                        } else {
+                            // 单行格式：直接添加
+                            converted = beforeImage + ' -e HF_ENDPOINT=https://hf-mirror.com' + imageAndRest;
+                        }
+                        
+                        replacements.push('已添加 HF_ENDPOINT 环境变量');
+                    }
+                } else {
+                    replacements.push('已存在 HF_ENDPOINT (已更新为镜像站)');
+                }
+            }
+
+            // 检测是否有续行
+            const hasMultiLine = input.includes('\\') || converted.includes('`');
+            
             if (hasMultiLine) {
-                noticeText.textContent = '已转换为 PowerShell 多行格式（使用反引号 ` 续行）';
+                replacements.push('已转换为 PowerShell 多行格式');
+            }
+
+            output.value = converted;
+            
+            if (replacements.length > 0) {
+                noticeText.textContent = replacements.join(' | ');
                 notice.classList.remove('hidden');
             } else {
-                noticeText.textContent = '命令为单行，无需特殊处理';
+                noticeText.textContent = '命令已转换';
                 notice.classList.remove('hidden');
             }
         }
